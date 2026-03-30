@@ -38,10 +38,12 @@ class BreakoutRoomHostBot:
         self.meeting_service_event = None
         self.bo_controller = None
         self.bo_creator = None
+        self.bo_creator_event = None
         self.bo_admin = None  # Add admin object for user assignment
         self.bo_admin_event = None
         self.bo_event = None
         self.bo_data_helper = None
+        self.bo_started = False  # Track if StartBO has been called
         self.main_loop = None
         self.is_authenticated = False
         self.is_meeting_started = False
@@ -54,11 +56,79 @@ class BreakoutRoomHostBot:
         self.participants_list = []
         self.room_assignments = {}
         self.created_rooms = {}  # Store actual BO IDs and names
+        self.pending_pair_rooms = {}  # Store pending room creation info
+        
+        # Pair-based assignment (mentee, mentor)
+        self.user_pairs = {}  # {'mentee_name': 'mentor_name', ...}
+        self.pair_room_assignments = {}  # Track which room each pair is assigned to
         
         # Creator rights and event handling
         self.has_creator_rights = False
         self.creator_event_handler = None
         self.pending_room_creation = False
+
+    def load_user_pairs_from_file(self, pairs_file="pairs.txt"):
+        """Load mentee-mentor pairs from a text file.
+        
+        File format: One pair per line, format is "mentee_name, mentor_name"
+        Example:
+            isurumuni, anas
+            mentee1, mentor1
+        """
+        try:
+            self.user_pairs = {}
+            
+            # Check if file exists
+            if not os.path.exists(pairs_file):
+                print(f"⚠️  Pairs file not found: {pairs_file}")
+                print("   📁 Creating sample pairs.txt file...")
+                # Create sample file
+                sample_pairs = [
+                    "Isurumuni, Anas",
+                    "mentee1, mentor1",
+                    "mentee2, mentor2",
+                    "mentee3, mentor3",
+                    "mentee4, mentor4"
+                ]
+                try:
+                    with open(pairs_file, 'w') as f:
+                        f.write('\n'.join(sample_pairs))
+                    print(f"   ✅ Created sample {pairs_file}")
+                    return []
+                except Exception as e:
+                    print(f"   ❌ Could not create sample file: {e}")
+                    return []
+            
+            # Read and parse pairs file
+            with open(pairs_file, 'r') as f:
+                lines = f.readlines()
+            
+            for line_num, line in enumerate(lines, 1):
+                line = line.strip()
+                
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                
+                # Parse the pair
+                parts = [p.strip() for p in line.split(',')]
+                
+                if len(parts) >= 2:
+                    mentee_name = parts[0]
+                    mentor_name = parts[1]
+                    
+                    # Store the pair (use mentee name as key)
+                    self.user_pairs[mentee_name] = mentor_name
+                    print(f"📋 Pair {len(self.user_pairs)}: {mentee_name} ➜ {mentor_name}")
+                else:
+                    print(f"⚠️  Line {line_num} invalid format (expected 'mentee, mentor'): {line}")
+            
+            print(f"✅ Loaded {len(self.user_pairs)} user pairs from {pairs_file}\n")
+            return list(self.user_pairs.keys())
+            
+        except Exception as e:
+            print(f"❌ Error loading pairs file: {e}")
+            return []
 
     def generate_jwt(self, client_id, client_secret):
         """Generate JWT token for Zoom authentication"""
@@ -303,6 +373,12 @@ class BreakoutRoomHostBot:
             print("="*50)
             print(f"📊 Total participants (excluding bot): {len(self.participants_list)}\n")
             
+            # Load user pairs for mentee-mentor assignment
+            print("📋 LOADING USER PAIRS FOR BREAKOUT ROOM ASSIGNMENT")
+            print("="*50)
+            self.load_user_pairs_from_file("pairs.txt")
+            print("="*50 + "\n")
+            
             # Check if bot is already host
             try:
                 my_user = self.participants_ctrl.GetMySelfUser()
@@ -385,7 +461,7 @@ class BreakoutRoomHostBot:
             return True  # Try again
 
     def on_user_join_callback(self, joined_user_ids, user_name=None):
-        """Handle when new users join the meeting"""
+        """Handle when new users join - Create rooms and assign on-demand"""
         try:
             # Handle potential None or type issues
             user_name_str = str(user_name) if user_name is not None else "Unknown User"
@@ -395,7 +471,7 @@ class BreakoutRoomHostBot:
             print(f"⚠️  Error in user join callback: {e}")
             return
         
-        # Update participants list
+        # Update participants list and trigger on-demand room creation
         for user_id in joined_user_ids:
             if user_id != self.my_participant_id:
                 try:
@@ -412,44 +488,390 @@ class BreakoutRoomHostBot:
                     # Add to list if not already there
                     if not any(p['id'] == user_id for p in self.participants_list):
                         self.participants_list.append(participant_data)
-                        print(f"✅ Added to participant list: {user_name} | Email: {email}")
+                        print(f"✅ Added to participant list: {user_name}")
                         
-                        # Auto-assign to breakout room if rooms are already created
-                        if self.breakout_rooms_created and self.bo_creator and self.created_rooms:
-                            self.assign_participant_to_room(participant_data)
+                        # 🔄 ON-DEMAND ROOM CREATION FOR PAIRS
+                        print(f"\n🔍 Checking pairs for: {user_name}")
+                        self.create_and_assign_room_for_user(participant_data)
                             
                 except Exception as e:
                     print(f"⚠️  Error processing new participant {user_id}: {e}")
 
-    def assign_participant_to_room(self, participant):
-        """Assign a participant to a breakout room"""
-        if not self.created_rooms:
-            print("❌ No rooms available for assignment")
-            return
-            
+    def create_and_assign_room_for_user(self, participant):
+        """
+        On-demand room creation:
+        1. Check if user is in pairs.txt
+        2. Create room for the pair if not exists
+        3. Assign user to that room
+        """
         try:
-            # Get available room numbers
-            available_rooms = list(self.created_rooms.keys())
-            if not available_rooms:
-                print("❌ No successfully created rooms available")
+            user_name = participant['name']
+            user_id = participant['id']
+            
+            print(f"\n🔍 Processing user join: {user_name} (ID: {user_id})")
+            
+            # Find pair in pairs.txt (case-insensitive)
+            pair_match = None
+            pair_role = None
+            pair_key = None
+            
+            for mentee_name, mentor_name in self.user_pairs.items():
+                if user_name.lower() == mentee_name.lower():
+                    pair_match = mentor_name
+                    pair_role = 'mentee'
+                    pair_key = f"{mentee_name}_{mentor_name}"
+                    break
+                elif user_name.lower() == mentor_name.lower():
+                    pair_match = mentee_name
+                    pair_role = 'mentor'
+                    pair_key = f"{mentee_name}_{mentor_name}"
+                    break
+            
+            if not pair_match:
+                print(f"   ⚠️  {user_name} is not in pairs.txt - skipping room creation")
                 return
+            
+            print(f"   ✅ {user_name} is a {pair_role.upper()}, paired with: {pair_match}")
+            
+            # Initialize dictionaries if needed
+            if not hasattr(self, 'created_rooms'):
+                self.created_rooms = {}
+            if not hasattr(self, 'pending_pair_rooms'):
+                self.pending_pair_rooms = {}
+            
+            # Check if room already exists for this pair
+            if pair_key in self.created_rooms:
+                room_info = self.created_rooms[pair_key]
+                print(f"   ✅ Room already exists: {room_info['name']}")
                 
-            # Simple round-robin assignment to available rooms
-            room_index = len(self.room_assignments) % len(available_rooms)
-            room_number = available_rooms[room_index]
-            room_info = self.created_rooms[room_number]
+                if not hasattr(self, 'bo_started') or not self.bo_started:
+                    self._start_bo_system()
+                
+                # Schedule assignment after a short delay to ensure BO is ready
+                GLib.timeout_add(500, lambda uid=str(user_id), rid=room_info['id'], rname=room_info['name']: 
+                    self.assign_to_room(uid, rid, rname))
+                return
             
-            # Convert IDs to strings for the API call
-            user_id_str = str(participant['id'])
-            bo_id_str = room_info['id']
+            # Check if room creation is already pending
+            if pair_key in self.pending_pair_rooms:
+                print(f"   ⏳ Room creation already pending for this pair")
+                return
             
-            result = self.bo_creator.AssignUserToBO(user_id_str, bo_id_str)
-            self.room_assignments[participant['id']] = room_number
+            # Check if we have creator rights
+            if not self.bo_creator:
+                print(f"   ❌ No creator helper available")
+                return
             
-            print(f"🎯 Assigned {participant['name']} to {room_info['name']} | Result: {result}")
+            print(f"   ✅ Creator helper available")
+            
+            # Create new room for this pair
+            room_name = f"{pair_match} & {user_name}"
+            print(f"   🏗️  Creating room: '{room_name}'")
+            
+            # Store pending room info
+            self.pending_pair_rooms[pair_key] = {
+                'room_name': room_name,
+                'current_user': participant,
+                'pair_name': pair_match,
+                'user_id': user_id
+            }
+            
+            # Use CreateBreakoutRoom which has proper callbacks
+            print(f"   📞 Calling CreateBreakoutRoom('{room_name}')...")
+            result = self.bo_creator.CreateBreakoutRoom(room_name)
+            print(f"   📋 CreateBreakoutRoom returned: {result}")
+            
+            if not result:
+                print(f"   ❌ CreateBreakoutRoom failed")
+                # Clean up pending
+                if pair_key in self.pending_pair_rooms:
+                    del self.pending_pair_rooms[pair_key]
+                
+        except Exception as e:
+            print(f"   ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _start_bo_system(self):
+        """Start the breakout room system - call only after rooms are created"""
+        if not self.bo_admin:
+            print(f"   ❌ No BO admin available")
+            return False
+        
+        if hasattr(self, 'bo_started') and self.bo_started:
+            print(f"   ℹ️  BO already started")
+            return True
+        
+        try:
+            print(f"   🚀 Starting breakout room system...")
+            result = self.bo_admin.StartBO()
+            print(f"      StartBO() returned: {result}")
+            
+            if result:
+                self.bo_started = True
+                print(f"      ✅ BO system is now running!")
+                return True
+            else:
+                print(f"      ⚠️  StartBO returned False - will retry in 2 seconds...")
+                # Schedule retry
+                GLib.timeout_add(2000, self._retry_start_bo_and_assign)
+                return False
+        except Exception as e:
+            print(f"      ❌ Error: {e}")
+            return False
+    
+    def _retry_start_bo_and_assign(self):
+        """Retry StartBO and process any pending assignments"""
+        if hasattr(self, 'bo_started') and self.bo_started:
+            return False  # Already started, don't repeat
+        
+        try:
+            print(f"\n🔄 Retrying StartBO()...")
+            if self.bo_admin:
+                result = self.bo_admin.StartBO()
+                print(f"   StartBO() returned: {result}")
+                
+                if result:
+                    self.bo_started = True
+                    print(f"   ✅ BO system is now running!")
+                    
+                    # Process any pending assignments
+                    self._process_pending_assignments()
+                    return False  # Don't repeat
+                else:
+                    print(f"   ⚠️  Still False - retrying in 2 more seconds...")
+                    GLib.timeout_add(2000, self._retry_start_bo_and_assign)
+        except Exception as e:
+            print(f"   ❌ Retry error: {e}")
+        
+        return False  # Don't repeat
+    
+    def _process_pending_assignments(self):
+        """Process any pending user assignments after BO is started"""
+        if not hasattr(self, 'pending_assignments') or not self.pending_assignments:
+            return False
+        
+        print(f"\n   📋 Processing {len(self.pending_assignments)} pending assignments...")
+        
+        for assignment in list(self.pending_assignments):
+            user_id, room_id, room_name = assignment
+            print(f"   🔗 Assigning user {user_id} to {room_name}...")
+            self.assign_to_room(user_id, room_id, room_name)
+        
+        self.pending_assignments = []  # Clear pending
+        return False  # Don't repeat for GLib
+
+    def assign_to_room(self, user_id_str, bo_id_str, room_name):
+        """Assign a single user to a breakout room with proper error handling"""
+        try:
+            if not self.bo_admin:
+                print(f"      ❌ No admin rights")
+                return False
+            
+            # Validate inputs
+            if not user_id_str or not bo_id_str:
+                print(f"      ❌ Invalid user_id or bo_id")
+                return False
+            
+            print(f"      🔗 Assigning {user_id_str} to room {bo_id_str} ({room_name})")
+            
+            # Try assignment
+            try:
+                result = self.bo_admin.AssignNewUserToRunningBO(user_id_str, bo_id_str)
+                if result:
+                    print(f"      ✅ User assigned to {room_name}")
+                    
+                    # Force user to join the room automatically
+                    try:
+                        join_result = self.bo_admin.JoinBOByUserRequest(user_id_str, bo_id_str)
+                        if join_result:
+                            print(f"      ✅ User automatically moved to {room_name}")
+                        else:
+                            print(f"      ⚠️  JoinBOByUserRequest returned False - user must click Join")
+                    except Exception as e:
+                        print(f"      ⚠️  Could not auto-join user: {e}")
+                    
+                    return True
+            except Exception as e:
+                print(f"      ⚠️  AssignNewUserToRunningBO failed: {e}")
+            
+            # Try fallback
+            try:
+                result = self.bo_admin.SwitchAssignedUserToRunningBO(user_id_str, bo_id_str)
+                if result:
+                    print(f"      ✅ User switched to {room_name}")
+                    return True
+            except Exception as e:
+                print(f"      ⚠️  SwitchAssignedUserToRunningBO failed: {e}")
+            
+            print(f"      ❌ Both assignment methods failed")
+            return False
             
         except Exception as e:
-            print(f"❌ Error assigning {participant['name']} to room: {e}")
+            print(f"      ❌ Error in assignment: {e}")
+            return False
+
+    def assign_all_participants_to_rooms_by_pairs(self):
+        """Assign participants to breakout rooms based on mentee-mentor pairs using admin rights.
+        
+        This method uses the BOAdmin interface (AssignNewUserToRunningBO) which works
+        for participants already in the main meeting room.
+        """
+        if not self.bo_admin or not self.participants_list or not self.created_rooms:
+            print("❌ Missing requirements: admin={}, participants={}, rooms={}".format(
+                self.bo_admin is not None, 
+                len(self.participants_list) if self.participants_list else 0,
+                len(self.created_rooms) if self.created_rooms else 0
+            ))
+            return False
+        
+        if not self.user_pairs:
+            print("⚠️  No user pairs loaded - falling back to round-robin assignment")
+            return self.assign_all_participants_to_rooms()
+        
+        print(f"\n🎯 ASSIGNING PARTICIPANTS BY PAIRS TO BREAKOUT ROOMS")
+        print("="*70)
+        print(f"👥 Pairs to assign: {len(self.user_pairs)}")
+        print(f"📊 Available rooms: {len(self.created_rooms)}")
+        print(f"👤 Total participants: {len(self.participants_list)}")
+        print("-"*70)
+        
+        # Create a map of participant names to IDs for quick lookup
+        participant_name_to_id = {}
+        participant_id_to_name = {}
+        for participant in self.participants_list:
+            name = participant['name']
+            pid = participant['id']
+            participant_name_to_id[name] = pid
+            participant_id_to_name[pid] = name
+        
+        # Get available room IDs
+        available_rooms = list(self.created_rooms.keys())
+        room_pair_assignments = {}  # Track which pair is in which room
+        successful_assignments = 0
+        failed_assignments = 0
+        
+        # Assign each pair (mentee and mentor) to the same breakout room
+        pair_index = 0
+        for mentee_name, mentor_name in self.user_pairs.items():
+            try:
+                # Find mentee ID
+                mentee_id = participant_name_to_id.get(mentee_name)
+                mentor_id = participant_name_to_id.get(mentor_name)
+                
+                if not mentee_id:
+                    print(f"⚠️  Mentee '{mentee_name}' not found in meeting participants - skipping pair")
+                    failed_assignments += 1
+                    continue
+                
+                if not mentor_id:
+                    print(f"⚠️  Mentor '{mentor_name}' not found in meeting participants - skipping pair")
+                    failed_assignments += 1
+                    continue
+                
+                # Assign pair to a specific room (round-robin)
+                room_number = available_rooms[pair_index % len(available_rooms)]
+                room_info = self.created_rooms[room_number]
+                
+                print(f"\n🔗 Pair {pair_index + 1}: {mentee_name} (mentee) ↔ {mentor_name} (mentor)")
+                print(f"   → Assigning to {room_info['name']} (ID: {room_info['id']})")
+                
+                # Assign mentee
+                try:
+                    mentee_id_str = str(mentee_id)
+                    bo_id_str = room_info['id']
+                    
+                    if hasattr(self.bo_admin, 'AssignNewUserToRunningBO'):
+                        result_mentee = self.bo_admin.AssignNewUserToRunningBO(mentee_id_str, bo_id_str)
+                    elif hasattr(self.bo_admin, 'SwitchAssignedUserToRunningBO'):
+                        result_mentee = self.bo_admin.SwitchAssignedUserToRunningBO(mentee_id_str, bo_id_str)
+                    else:
+                        result_mentee = False
+                        print(f"   ⚠️  No assignment method available on bo_admin")
+                    
+                    if result_mentee:
+                        print(f"   ✅ {mentee_name} assigned successfully")
+                        self.room_assignments[mentee_id] = room_number
+                        successful_assignments += 1
+                    else:
+                        print(f"   ❌ {mentee_name} assignment failed")
+                        failed_assignments += 1
+                        
+                except Exception as e:
+                    print(f"   ❌ Error assigning mentee {mentee_name}: {e}")
+                    failed_assignments += 1
+                
+                # Assign mentor
+                try:
+                    mentor_id_str = str(mentor_id)
+                    bo_id_str = room_info['id']
+                    
+                    if hasattr(self.bo_admin, 'AssignNewUserToRunningBO'):
+                        result_mentor = self.bo_admin.AssignNewUserToRunningBO(mentor_id_str, bo_id_str)
+                    elif hasattr(self.bo_admin, 'SwitchAssignedUserToRunningBO'):
+                        result_mentor = self.bo_admin.SwitchAssignedUserToRunningBO(mentor_id_str, bo_id_str)
+                    else:
+                        result_mentor = False
+                    
+                    if result_mentor:
+                        print(f"   ✅ {mentor_name} assigned successfully")
+                        self.room_assignments[mentor_id] = room_number
+                        successful_assignments += 1
+                    else:
+                        print(f"   ❌ {mentor_name} assignment failed")
+                        failed_assignments += 1
+                        
+                except Exception as e:
+                    print(f"   ❌ Error assigning mentor {mentor_name}: {e}")
+                    failed_assignments += 1
+                
+                pair_index += 1
+                
+            except Exception as e:
+                print(f"❌ Error processing pair ({mentee_name}, {mentor_name}): {e}")
+                failed_assignments += 1
+        
+        # Assign remaining participants (not in pairs) to available rooms
+        assigned_user_ids = set(self.room_assignments.keys())
+        unassigned_participants = [p for p in self.participants_list if p['id'] not in assigned_user_ids]
+        
+        if unassigned_participants:
+            print(f"\n👥 Assigning {len(unassigned_participants)} unassigned participants to remaining rooms...")
+            for i, participant in enumerate(unassigned_participants):
+                try:
+                    room_number = available_rooms[(pair_index + i) % len(available_rooms)]
+                    room_info = self.created_rooms[room_number]
+                    
+                    user_id_str = str(participant['id'])
+                    bo_id_str = room_info['id']
+                    
+                    if hasattr(self.bo_admin, 'AssignNewUserToRunningBO'):
+                        result = self.bo_admin.AssignNewUserToRunningBO(user_id_str, bo_id_str)
+                    elif hasattr(self.bo_admin, 'SwitchAssignedUserToRunningBO'):
+                        result = self.bo_admin.SwitchAssignedUserToRunningBO(user_id_str, bo_id_str)
+                    else:
+                        result = False
+                    
+                    if result:
+                        self.room_assignments[participant['id']] = room_number
+                        print(f"   ✅ {participant['name']} → {room_info['name']}")
+                        successful_assignments += 1
+                    else:
+                        print(f"   ❌ {participant['name']} → {room_info['name']} failed")
+                        failed_assignments += 1
+                        
+                except Exception as e:
+                    print(f"   ❌ Error assigning {participant['name']}: {e}")
+                    failed_assignments += 1
+        
+        print("="*70)
+        print(f"✅ Assignment Summary: {successful_assignments} successful, {failed_assignments} failed")
+        print(f"🎯 Total assigned: {len(self.room_assignments)}/{len(self.participants_list)}")
+        
+        if successful_assignments > 0:
+            print("🎉 Pairs and remaining participants assigned to breakout rooms!")
+        
+        return successful_assignments > 0
 
     def assign_all_participants_to_rooms(self):
         """Assign all current participants to breakout rooms using creator interface"""
@@ -548,7 +970,7 @@ class BreakoutRoomHostBot:
         print("")
         
     def setup_breakout_rooms(self):
-        """Set up breakout room controller and create rooms"""
+        """Set up breakout room controller with event callbacks - NO automatic room creation"""
         try:
             # Get the breakout room controller
             self.bo_controller = self.meeting_service.GetMeetingBOController()
@@ -564,33 +986,137 @@ class BreakoutRoomHostBot:
                 return False
 
             print("✅ Breakout rooms are enabled")
-
-            # Completely avoid all BO callbacks due to std::bad_cast crashes
-            # Set up BO event handler to listen for creator rights notification
+            
+            # Get admin helper for later room assignment and starting BO
             try:
-                print("🔧 Setting up BO event handler for creator rights...")
-                
-                # Create BO event handler with the correct class name and callback
-                self.bo_event = zoom.MeetingBOEventCallbacks(
-                    onHasCreatorRightsNotificationCallback=self.on_has_creator_rights_notification
-                )
-                self.bo_controller.SetEvent(self.bo_event)
-                print("✅ BO event handler set - listening for creator rights...")
-                
-                # Give some time for callbacks to trigger
-                print("⏳ Waiting for creator rights notification...")
-                GLib.timeout_add(5000, self.check_creator_rights_fallback)
-                
+                self.bo_admin = self.bo_controller.GetBOAdminHelper()
+                if self.bo_admin:
+                    print("✅ Got BO admin helper - ready for room assignment and StartBO")
+                else:
+                    print("⏳ Waiting for admin helper to be available...")
             except Exception as e:
-                print(f"⚠️  Could not set BO event handler: {e}")
-                print("🔄 Falling back to direct approach...")
-                GLib.timeout_add(3000, self.create_breakout_rooms_without_callbacks)
+                print(f"⚠️  Could not get BO admin helper yet: {e}")
+            
+            # Get creator helper for room creation and setup event handler
+            try:
+                self.bo_creator = self.bo_controller.GetBOCreatorHelper()
+                if self.bo_creator:
+                    print("✅ Got BO creator helper - ready to create rooms on-demand")
+                    # Setup event callbacks for room creation
+                    self.setup_creator_event_handler()
+                else:
+                    print("⏳ Waiting for creator helper to be available...")
+            except Exception as e:
+                print(f"⚠️  Could not get BO creator yet: {e}")
+            
+            # Initialize pending rooms and room tracking
+            if not hasattr(self, 'pending_pair_rooms'):
+                self.pending_pair_rooms = {}
+            if not hasattr(self, 'created_rooms'):
+                self.created_rooms = {}
+            if not hasattr(self, 'room_assignments'):
+                self.room_assignments = {}
+            
+            # Mark that BO is ready but NOT started yet
+            # Rooms must be created BEFORE StartBO() is called
+            self.bo_ready_for_creation = True
+            self.bo_started = False
+            
+            print("\n📋 READY FOR DYNAMIC PAIR ASSIGNMENT")
+            print("="*60)
+            print("✅ Waiting for users to join meeting")
+            print("✅ Rooms will be created on-demand as pairs join")
+            print("✅ BO will be started when first user joins")
+            print("="*60 + "\n")
 
             return False  # Don't repeat this timeout
 
         except Exception as e:
             print(f"❌ Error setting up breakout rooms: {e}")
             return False
+
+    def setup_creator_event_handler(self):
+        """Setup event callbacks for BO creator to handle room creation responses"""
+        try:
+            if not self.bo_creator:
+                print("   ⚠️  Cannot setup creator event handler - no creator helper")
+                return
+            
+            import zoom_meeting_sdk as zoom
+            
+            # Create callback that handles room creation response
+            def on_create_bo_response(success, room_id_str):
+                """Callback fired when CreateBreakoutRoom() response is received"""
+                print(f"\n📮 onCreateBOResponse CALLBACK: success={success}, room_id={room_id_str}")
+                
+                if not success:
+                    print(f"   ❌ Room creation failed")
+                    return
+                
+                print(f"   ✅ Room created! ID: {room_id_str}")
+                
+                # Find matching pending room by name matching
+                matched_pair_key = None
+                pending_info = None
+                
+                for pair_key, pinfo in list(self.pending_pair_rooms.items()):
+                    # Check if room names match
+                    if pinfo['room_name']:
+                        matched_pair_key = pair_key
+                        pending_info = pinfo
+                        break
+                
+                if matched_pair_key and pending_info:
+                    # Store the created room with its actual ID
+                    self.created_rooms[matched_pair_key] = {
+                        'id': room_id_str,
+                        'name': pending_info['room_name'],
+                        'pair_key': matched_pair_key
+                    }
+                    
+                    print(f"   ✅ Room registered: {pending_info['room_name']} -> ID: {room_id_str}")
+                    
+                    # Initialize pending assignments list if needed
+                    if not hasattr(self, 'pending_assignments'):
+                        self.pending_assignments = []
+                    
+                    # Store this assignment as pending
+                    user_id = pending_info['user_id']
+                    self.pending_assignments.append((str(user_id), room_id_str, pending_info['room_name']))
+                    print(f"   📋 Queued assignment: user {user_id} -> {pending_info['room_name']}")
+                    
+                    # Start BO if not already started
+                    if not hasattr(self, 'bo_started') or not self.bo_started:
+                        print(f"   🚀 Auto-starting BO after first room created...")
+                        started = self._start_bo_system()
+                        
+                        # If StartBO succeeded immediately, process assignments
+                        if started:
+                            GLib.timeout_add(1000, self._process_pending_assignments)
+                    else:
+                        # BO already running, process assignment after short delay
+                        print(f"   🔗 BO already running, assigning in 1 second...")
+                        GLib.timeout_add(1000, self._process_pending_assignments)
+                    
+                    # Remove from pending
+                    del self.pending_pair_rooms[matched_pair_key]
+                else:
+                    print(f"   ⚠️  Could not find matching pending room")
+            
+            # Create the event callback object
+            creator_event = zoom.BOCreatorEventCallbacks(
+                onCreateBOResponseCallback=on_create_bo_response
+            )
+            
+            # Attach event handler to creator
+            self.bo_creator.SetEvent(creator_event)
+            self.bo_creator_event = creator_event
+            print("   ✅ Creator event handler setup complete")
+            
+        except Exception as e:
+            print(f"   ⚠️  Error setting up creator event handler: {e}")
+            import traceback
+            traceback.print_exc()
 
     def create_breakout_rooms_without_callbacks(self):
         """Create breakout rooms using direct API calls without callbacks"""
@@ -713,6 +1239,9 @@ class BreakoutRoomHostBot:
             return False
             
     def create_rooms_with_creator(self):
+        """DEPRECATED: Use on-demand pair-based room creation instead"""
+        print("⚠️  create_rooms_with_creator() is deprecated - using on-demand pair-based creation instead")
+        return False
         """Create rooms using creator helper"""
         # Prevent duplicate room creation attempts
         if self.pending_room_creation:
@@ -1097,6 +1626,7 @@ class BreakoutRoomHostBot:
                     
                     if result is True or result == True:
                         print("✅ StartBO() succeeded - rooms should now appear in Zoom UI!")
+                        print("🔄 Now listening for users joining - dynamic pair assignment active...")
                     elif result is False or result == False:
                         print("⚠️  StartBO() returned False")
                         print("   Trying again in 2 seconds...")
@@ -1136,6 +1666,7 @@ class BreakoutRoomHostBot:
                 print(f"   StartBO retry result: {result}")
                 if result:
                     print("✅ StartBO() succeeded on retry!")
+                    print("🔄 Now listening for users joining - dynamic pair assignment active...")
                 else:
                     print("⚠️  StartBO() still returned False")
                     print("💡 Check: Zoom meeting settings, host permissions, account plan")
@@ -1150,152 +1681,17 @@ class BreakoutRoomHostBot:
             print("🎛️  Received onHasCreatorRightsNotification callback!")
             self.has_creator_rights = True
             
-            # Set up creator event handler for room creation callbacks
+            # Set up creator event handler for room creation callbacks (pair-based, on-demand)
             self.setup_creator_event_handler()
             
-            # Now we can safely create breakout rooms
-            print("✅ Creator rights confirmed - ready to create breakout rooms")
-            GLib.timeout_add(1000, self.create_rooms_with_creator)
+            # Note: Rooms are created on-demand when users join, not upfront
+            print("✅ Creator rights confirmed - waiting for users to join for on-demand pair-based room creation")
             
         except Exception as e:
             print(f"❌ Error in creator rights notification: {e}")
-    
-    def setup_creator_event_handler(self):
-        """Set up IBOCreatorEvent handler for room creation callbacks"""
-        try:
-            if self.debug_mode:
-                print("🔧 [DEBUG] setup_creator_event_handler called")
-            if not self.bo_creator:
-                print("⚠️  No BO creator available to setup event handler")
-                return False
-            
-            if self.debug_mode:
-                print("🔧 [DEBUG] Creating callback functions...")
-            
-            # Create proper SDK binding event callbacks
-            def on_create_bo_response(success, room_id):
-                """Called when breakout room creation completes"""
-                try:
-                    if self.debug_mode:
-                        print(f"🔧 [DEBUG] onCreateBOResponse callback fired: success={success}, room_id={room_id}")
-                    
-                    print(f"📮 onCreateBOResponse CALLBACK FIRED: success={success}, room_id={room_id}")
-                    if success and room_id:
-                        # Store the created room ID
-                        room_count = len(self.created_rooms) + 1
-                        room_names = ["Team Alpha", "Team Beta", "Team Gamma", "Team Delta", "Team Echo"]
-                        room_name = room_names[room_count - 1] if room_count <= len(room_names) else f"Room {room_count}"
-                        
-                        self.created_rooms[room_count] = {
-                            'id': str(room_id),
-                            'name': room_name
-                        }
-                        
-                        if self.debug_mode:
-                            print(f"   [DEBUG] Room stored: {room_name} -> {room_id}")
-                        
-                        print(f"✅ Room '{room_name}' created successfully with ID: {room_id}")
-                        
-                        # Check if all 5 rooms are created
-                        if len(self.created_rooms) >= 5:
-                            self.breakout_rooms_created = True
-                            print(f"🎉 All 5 breakout rooms created successfully!")
-                            if self.debug_mode:
-                                print("   [DEBUG] All rooms now tracked")
-                            
-                            # ✅ CRITICAL: NOW call StartBO() - all rooms confirmed to exist
-                            print("🚀 All rooms confirmed - now calling StartBO() to make them visible in UI...")
-                            GLib.timeout_add(500, self._start_breakout_rooms)
-                        else:
-                            print(f"   📊 {len(self.created_rooms)}/5 rooms created so far... waiting for more callbacks")
-                    else:
-                        print(f"   ⚠️  Failed: success={success}, room_id={room_id}")
-                except Exception as e:
-                    print(f"❌ Error in onCreateBOResponse: {e}")
-                    import traceback
-                    traceback.print_exc()
-            
-            def on_option_changed(option):
-                """Handle BO option changes"""
-                try:
-                    if self.debug_mode:
-                        print(f"🔧 [DEBUG] onBOOptionChanged callback fired: {option}")
-                    print(f"⚙️  OnBOOptionChanged CALLBACK FIRED: {option}")
-                except Exception as e:
-                    print(f"❌ Error in onBOOptionChanged: {e}")
-            
-            def on_remove_bo_response(success, room_id):
-                """Handle BO removal response"""
-                try:
-                    if self.debug_mode:
-                        print(f"🔧 [DEBUG] onRemoveBOResponse callback fired: success={success}, room_id={room_id}")
-                    print(f"📮 onRemoveBOResponse CALLBACK FIRED: success={success}, room_id={room_id}")
-                except Exception as e:
-                    print(f"❌ Error in onRemoveBOResponse: {e}")
-            
-            def on_update_name_response(success, room_id):
-                """Handle BO name update response"""
-                try:
-                    if self.debug_mode:
-                        print(f"🔧 [DEBUG] onUpdateBONameResponse callback fired: success={success}, room_id={room_id}")
-                    print(f"📮 onUpdateBONameResponse CALLBACK FIRED: success={success}, room_id={room_id}")
-                except Exception as e:
-                    print(f"❌ Error in onUpdateBONameResponse: {e}")
-            
-            # Create the SDK binding event handler with callbacks
-            if self.debug_mode:
-                print("🔧 [DEBUG] Creating BOCreatorEventCallbacks object...")
-            
-            self.creator_event_handler = zoom.BOCreatorEventCallbacks(
-                onCreateBOResponseCallback=on_create_bo_response,
-                onBOOptionChangedCallback=on_option_changed,
-                onRemoveBOResponseCallback=on_remove_bo_response,
-                onUpdateBONameResponseCallback=on_update_name_response
-            )
-            
-            if self.debug_mode:
-                print(f"🔧 [DEBUG] Handler object created: {self.creator_event_handler}")
-            
-            # Set the event handler on the creator
-            try:
-                if self.debug_mode:
-                    print("🔧 [DEBUG] Calling SetEvent()...")
-                
-                self.bo_creator.SetEvent(self.creator_event_handler)
-                
-                if self.debug_mode:
-                    print("🔧 [DEBUG] SetEvent() call completed")
-                print("✅ IBOCreatorEvent handler set successfully - now ready to create rooms!")
-                return True
-            except Exception as e:
-                print(f"⚠️  Could not set creator event handler: {e}")
-                if self.debug_mode:
-                    print(f"   [DEBUG] SetEvent error: {e}")
-                print("⚠️  Attempting room creation without event handler...")
-                return False
-            
-        except Exception as e:
-            print(f"❌ Error setting up creator event handler: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
 
-
-    def on_has_admin_rights(self, bo_admin=None):
-        """Handle when we get admin rights for breakout rooms"""
-        try:
-            print("🎛️  Got breakout room admin rights!")
-            self.bo_admin = bo_admin
-            
-            print("✅ Admin rights available for user assignment")
-            print("🏗️  Now creating breakout rooms and assigning users...")
-            
-            # First create rooms, then assign users
-            GLib.timeout_add(1000, self.create_rooms_with_creator)
-            GLib.timeout_add(3000, self.assign_users_with_admin_rights)
-            
-        except Exception as e:
-            print(f"❌ Error in admin rights callback: {e}")
+    def assign_all_participants_to_rooms_by_pairs(self):
+        """Assign all participants to rooms based on pairs"""
 
 
 
@@ -1398,7 +1794,11 @@ class BreakoutRoomHostBot:
             print(f"📤 Leave meeting result: {leave_result}")
 
     def assign_users_with_admin_rights(self):
-        """Assign users to breakout rooms using admin rights from new BOAdmin interface"""
+        """Assign users to breakout rooms using admin rights from new BOAdmin interface.
+        
+        If user pairs are loaded, assigns mentee-mentor pairs to the same room.
+        Otherwise falls back to round-robin assignment.
+        """
         print("\n🎯 ASSIGNING USERS WITH ADMIN RIGHTS")
         print("="*50)
         
@@ -1443,48 +1843,57 @@ class BreakoutRoomHostBot:
             if not self.participants_list:
                 print("❌ No participants to assign")
                 return False
-                
-            print(f"👥 Assigning {len(self.participants_list)} participants to {len(room_list)} rooms")
             
-            successful_assignments = 0
-            
-            # Round-robin assignment using admin rights from new BOAdmin interface
-            for i, participant in enumerate(self.participants_list):
-                try:
-                    # Select room using round-robin
-                    room_index = i % len(room_list)
-                    breakout_id = room_list[room_index]
-                    user_id = str(participant['id'])
-                    
-                    print(f"🔄 Assigning {participant['name']} to room {room_index + 1}")
-                    print(f"   User ID: {user_id}, Breakout ID: {breakout_id}")
-                    
-                    # Try new BOAdmin methods for assignment
-                    result = False
-                    if hasattr(self.bo_admin, 'AssignNewUserToRunningBO'):
-                        result = self.bo_admin.AssignNewUserToRunningBO(user_id, breakout_id)
-                    elif hasattr(self.bo_admin, 'SwitchAssignedUserToRunningBO'):
-                        result = self.bo_admin.SwitchAssignedUserToRunningBO(user_id, breakout_id)
-                    
-                    if result:
-                        print(f"✅ {participant['name']} assigned successfully")
-                        successful_assignments += 1
-                    else:
-                        print(f"❌ Failed to assign {participant['name']}")
-                        
-                except Exception as e:
-                    print(f"❌ Error assigning {participant['name']}: {e}")
-                    
-            print("="*50)
-            print(f"✅ Assignment completed: {successful_assignments}/{len(self.participants_list)} users assigned")
-            
-            if successful_assignments > 0:
-                print("🎉 Users should now see breakout room assignments in their Zoom client!")
+            # Use pair-based assignment if pairs are loaded
+            if self.user_pairs:
+                print(f"🔗 Pair-based assignment mode activated")
+                return self.assign_all_participants_to_rooms_by_pairs()
             else:
-                print("💡 If assignments failed, check:")
-                print("   - Account has breakout room admin permissions")
-                print("   - Breakout rooms are properly created and running")
-                print("   - Users are in the main meeting room")
+                print(f"📊 Round-robin assignment mode (no pairs loaded)")
+                # Fall back to round-robin assignment
+                print(f"👥 Assigning {len(self.participants_list)} participants to {len(room_list)} rooms")
+                
+                successful_assignments = 0
+                
+                # Round-robin assignment using admin rights from new BOAdmin interface
+                for i, participant in enumerate(self.participants_list):
+                    try:
+                        # Select room using round-robin
+                        room_index = i % len(room_list)
+                        breakout_id = room_list[room_index]
+                        user_id = str(participant['id'])
+                        
+                        print(f"🔄 Assigning {participant['name']} to room {room_index + 1}")
+                        print(f"   User ID: {user_id}, Breakout ID: {breakout_id}")
+                        
+                        # Try new BOAdmin methods for assignment
+                        result = False
+                        if hasattr(self.bo_admin, 'AssignNewUserToRunningBO'):
+                            result = self.bo_admin.AssignNewUserToRunningBO(user_id, breakout_id)
+                        elif hasattr(self.bo_admin, 'SwitchAssignedUserToRunningBO'):
+                            result = self.bo_admin.SwitchAssignedUserToRunningBO(user_id, breakout_id)
+                        
+                        if result:
+                            print(f"✅ {participant['name']} assigned successfully")
+                            successful_assignments += 1
+                        else:
+                            print(f"❌ Failed to assign {participant['name']}")
+                            
+                    except Exception as e:
+                        print(f"❌ Error assigning {participant['name']}: {e}")
+                        
+                print("="*50)
+                print(f"✅ Assignment completed: {successful_assignments}/{len(self.participants_list)} users assigned")
+                
+                if successful_assignments > 0:
+                    print("🎉 Users should now see breakout room assignments in their Zoom client!")
+                else:
+                    print("💡 If assignments failed, check:")
+                    print("   - Account has breakout room admin permissions")
+                    print("   - Breakout rooms are properly created and running")
+                    print("   - Users are in the main meeting room")
+                
+                return successful_assignments > 0
             
         except Exception as e:
             print(f"❌ Error in admin assignment: {e}")
