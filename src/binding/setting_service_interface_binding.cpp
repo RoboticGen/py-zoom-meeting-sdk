@@ -63,11 +63,6 @@ void init_setting_service_interface_binding(nb::module_ &m) {
         .def("GetSuppressBackgroundNoiseLevel", &IAudioSettingContext::GetSuppressBackgroundNoiseLevel)
         .def("SetSuppressBackgroundNoiseLevel", &IAudioSettingContext::SetSuppressBackgroundNoiseLevel)
         .def("EnableMicOriginalInput", &IAudioSettingContext::EnableMicOriginalInput)
-        .def("IsMicOriginalInputEnable", &IAudioSettingContext::IsMicOriginalInputEnable)
-        .def("EnableHighFidelityMusicMode", &IAudioSettingContext::EnableHighFidelityMusicMode)
-        .def("IsHighFidelityMusicModeDisabled", &IAudioSettingContext::IsHighFidelityMusicModeDisabled)
         .def("DisableEchoCancellation", &IAudioSettingContext::DisableEchoCancellation)
-        .def("IsEchoCancellationDisabled", &IAudioSettingContext::IsEchoCancellationDisabled)
-        .def("EnableStereoAudio", &IAudioSettingContext::EnableStereoAudio)
-        .def("IsStereoAudioEnable", &IAudioSettingContext::IsStereoAudioEnable);
+        .def("IsEchoCancellationDisabled", &IAudioSettingContext::IsEchoCancellationDisabled);
 }
