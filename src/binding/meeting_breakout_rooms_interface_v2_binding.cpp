@@ -139,7 +139,7 @@ void init_meeting_breakout_rooms_interface_v2_binding(nb::module_ &m) {
     .def("RemoveUserFromBO", &IBOCreator::RemoveUserFromBO)
     .def("SetBOOption", &IBOCreator::SetBOOption)
     .def("GetBOOption", &IBOCreator::GetBOOption)
-    .def("GetBatchCreateBOHelper", &IBOCreator::GetBatchCreateBOHelper)
+    .def("GetBatchCreateBOHelper", &IBOCreator::GetBatchCreateBOHelper, nb::rv_policy::reference)
     .def("IsWebPreAssignBOEnabled", &IBOCreator::IsWebPreAssignBOEnabled)
     .def("RequestAndUseWebPreAssignBOList", &IBOCreator::RequestAndUseWebPreAssignBOList)
     .def("GetWebPreAssignBODataStatus", &IBOCreator::GetWebPreAssignBODataStatus)
