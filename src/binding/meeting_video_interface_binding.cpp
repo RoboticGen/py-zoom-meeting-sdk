@@ -120,7 +120,7 @@ void init_meeting_video_interface_binding(nb::module_ &m) {
         .def("IsFollowHostVideoOrderOn", &IMeetingVideoController::IsFollowHostVideoOrderOn)
         .def("GetVideoOrderList", &IMeetingVideoController::GetVideoOrderList)
         .def("IsIncomingVideoStopped", &IMeetingVideoController::IsIncomingVideoStopped)
-        .def("GetMeetingCameraHelper", &IMeetingVideoController::GetMeetingCameraHelper)
+        .def("GetMeetingCameraHelper", &IMeetingVideoController::GetMeetingCameraHelper, nb::rv_policy::reference)
         .def("RevokeCameraControlPrivilege", &IMeetingVideoController::RevokeCameraControlPrivilege)
         .def("CanEnableAlphaChannelMode", &IMeetingVideoController::CanEnableAlphaChannelMode)
         .def("EnableAlphaChannelMode", &IMeetingVideoController::EnableAlphaChannelMode)
