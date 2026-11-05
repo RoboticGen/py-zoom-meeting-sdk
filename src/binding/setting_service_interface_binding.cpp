@@ -50,6 +50,19 @@ void init_setting_service_interface_binding(nb::module_ &m) {
         .def("GetShareSettings", &ZOOM_SDK_NAMESPACE::ISettingService::GetShareSettings, nb::rv_policy::reference)
         .def("GetWallpaperSettings", &ZOOM_SDK_NAMESPACE::ISettingService::GetWallpaperSettings, nb::rv_policy::reference);
 
+    nb::enum_<Suppress_Background_Noise_Level>(m, "Suppress_Background_Noise_Level")
+        .value("Suppress_BGNoise_Level_None", Suppress_BGNoise_Level_None)
+        .value("Suppress_BGNoise_Level_Auto", Suppress_BGNoise_Level_Auto)
+        .value("Suppress_BGNoise_Level_Low", Suppress_BGNoise_Level_Low)
+        .value("Suppress_BGNoise_Level_Medium", Suppress_BGNoise_Level_Medium)
+        .value("Suppress_BGNoise_Level_High", Suppress_BGNoise_Level_High)
+        .export_values();
+
     nb::class_<IAudioSettingContext>(m, "IAudioSettingContext")
-        .def("EnableAutoJoinAudio", &IAudioSettingContext::EnableAutoJoinAudio);
+        .def("EnableAutoJoinAudio", &IAudioSettingContext::EnableAutoJoinAudio)
+        .def("GetSuppressBackgroundNoiseLevel", &IAudioSettingContext::GetSuppressBackgroundNoiseLevel)
+        .def("SetSuppressBackgroundNoiseLevel", &IAudioSettingContext::SetSuppressBackgroundNoiseLevel)
+        .def("EnableMicOriginalInput", &IAudioSettingContext::EnableMicOriginalInput)
+        .def("DisableEchoCancellation", &IAudioSettingContext::DisableEchoCancellation)
+        .def("IsEchoCancellationDisabled", &IAudioSettingContext::IsEchoCancellationDisabled);
 }
