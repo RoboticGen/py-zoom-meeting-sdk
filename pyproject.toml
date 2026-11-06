@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "zoom_meeting_sdk"
-version = "0.0.27"
+version = "0.0.28"
 description = "Python Bindings for the Zoom Meeting SDK"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,11 +45,11 @@ archs = ["x86_64"]
 # The tests don't work when run from cibuildwheel currently
 # so skipping all for now
 test-skip = "*"
-manylinux-x86_64-image = "manylinux_2_28"
+manylinux-x86_64-image = "manylinux_2_34"
 
 [tool.cibuildwheel.linux]
 before-all = [
-    "yum install -y ca-certificates gtk3-devel  python3-gobject-base python3-gobject pygtk2 pygtk2-devel gobject-introspection-devel python3-cairo-devel cairo-gobject-devel python3-cairo cairo-devel cmake curl gdb git libxcb-devel libxcb libatomic xcb-util-image xcb-util-image-devel xcb-util-keysyms-devel xcb-util-keysyms pkgconf", 
+    "yum install -y ca-certificates gtk3-devel  python3-gobject-base python3-gobject gobject-introspection-devel python3-cairo-devel cairo-gobject-devel python3-cairo cairo-devel cmake curl gdb git libxcb-devel libxcb libatomic xcb-util-image xcb-util-image-devel xcb-util-keysyms-devel xcb-util-keysyms pkgconf mesa-libgbm libdrm", 
     "cp ./src/zoomsdk/libmeetingsdk.so /lib64/libmeetingsdk.so.1", 
     "cp ./src/zoomsdk/qt_libs/Qt/lib/* /lib64/"
 ]

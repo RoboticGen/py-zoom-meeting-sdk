@@ -523,7 +523,7 @@ class MeetingBot:
         self.video_source_helper = zoom.GetRawdataVideoSourceHelper()
         if self.video_source_helper:
             print("video_source_helper is not None")
-            set_external_video_source_result = self.video_source_helper.setExternalVideoSource(self.virtual_camera_video_source)
+            set_external_video_source_result = self.video_source_helper.setExternalVideoSource(self.virtual_camera_video_source, zoom.FrameDataFormat_I420_FULL)
             print("set_external_video_source_result =", set_external_video_source_result)
             if set_external_video_source_result == zoom.SDKERR_SUCCESS:
                 print("starting video")
@@ -539,7 +539,7 @@ class MeetingBot:
         print("on_virtual_camera_start_send_callback called")
         if self.video_sender:
             red_frame = create_red_yuv420_frame(640, 360)
-            self.video_sender.sendVideoFrame(red_frame, 640, 360, 0, zoom.FrameDataFormat_I420_FULL)
+            self.video_sender.sendVideoFrame(red_frame, 640, 360, 0)
 
     def on_virtual_camera_initialize_callback(self, video_sender, support_cap_list, suggest_cap):
         print("on_virtual_camera_initialize_callback called")

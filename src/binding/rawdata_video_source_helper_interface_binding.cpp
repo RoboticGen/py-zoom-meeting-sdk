@@ -49,8 +49,8 @@ void init_rawdata_video_source_helper_interface_binding(nb::module_ &m) {
 
     // Bind IZoomSDKVideoSender
     nb::class_<IZoomSDKVideoSender>(m, "IZoomSDKVideoSender")
-        .def("sendVideoFrame", [](IZoomSDKVideoSender& self, nb::bytes frameBuffer, int width, int height, int rotation, FrameDataFormat format = FrameDataFormat_I420_FULL) -> SDKError {
-            return self.sendVideoFrame((char*)frameBuffer.c_str(), width, height, frameBuffer.size(), rotation, format);
+        .def("sendVideoFrame", [](IZoomSDKVideoSender& self, nb::bytes frameBuffer, int width, int height, int rotation) -> SDKError {
+            return self.sendVideoFrame((char*)frameBuffer.c_str(), width, height, frameBuffer.size(), rotation);
         });
 
     // Bind VideoSourceCapability
